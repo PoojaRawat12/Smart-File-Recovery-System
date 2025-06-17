@@ -5,75 +5,187 @@ from tkinter import filedialog, messagebox, ttk
 import json
 from datetime import datetime
 
+# Try to import winshell safely
+try:
+    import winshell
+    winshell_available = True
+except ImportError:
+    winshell_available = False
+    print("winshell module not found. Recycle Bin features disabled.")
+
 # Constants
 deleted_folder = "DeletedFile"
 recovered_folder = "RecoveredFile"
-log_file = "log.json"
+delete_log_file = "log.json"
 restore_log_file = "restore_log.json"
 os.makedirs(deleted_folder, exist_ok=True)
 os.makedirs(recovered_folder, exist_ok=True)
 
-# Load/save log and history
-def load_log():
-    if os.path.exists(log_file):
-        with open(log_file, 'r') as f:
+# --- Logging Functions ---
+def read_delete_log():
+    if os.path.exists(delete_log_file):
+        with open(delete_log_file, 'r') as f:
             return json.load(f)
     return {}
 
-def save_log(log):
-    with open(log_file, 'w') as f:
+def write_delete_log(log):
+    with open(delete_log_file, 'w') as f:
         json.dump(log, f, indent=4)
 
-def load_restore_log():
+def read_restore_history():
     if os.path.exists(restore_log_file):
         with open(restore_log_file, 'r') as f:
             return json.load(f)
     return []
 
-def save_restore_log(history):
+def write_restore_history(history):
     with open(restore_log_file, 'w') as f:
         json.dump(history, f, indent=4)
 
-# File Operations
-def delete_file():
-    file_path = filedialog.askopenfilename()
-    if file_path:
-        file_name = os.path.basename(file_path)
+# --- Delete File ---
+def select_and_delete_file():
+    file_path = filedialog.askopenfilename(title="Select file to delete")
+    if not file_path:
+        messagebox.showwarning("No File Selected", "You didn't select any file.")
+        return
+
+    if not os.path.isfile(file_path):
+        messagebox.showerror("Invalid Selection", "Please select a valid file (not a folder).")
+        return
+
+    file_name = os.path.basename(file_path)
+    confirm = messagebox.askyesno("Confirm Deletion", f"Are you sure you want to delete '{file_name}'?")
+    if not confirm:
+        return
+
+    try:
         shutil.move(file_path, os.path.join(deleted_folder, file_name))
-        log = load_log()
+        log = read_delete_log()
         log[file_name] = file_path
-        save_log(log)
-        update_file_lists()
-        messagebox.showinfo("Success", f"Deleted {file_name}")
+        write_delete_log(log)
+        refresh_file_lists()
+        messagebox.showinfo("Deleted", f"'{file_name}' has been deleted successfully.")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to delete '{file_name}':\n{e}")
 
-def recover_file():
+# --- Delete Folder ---
+def select_and_delete_folder():
+    folder_path = filedialog.askdirectory(title="Select folder to delete")
+    if not folder_path:
+        messagebox.showwarning("No Folder Selected", "You didn't select any folder.")
+        return
+
+    if not os.path.isdir(folder_path):
+        messagebox.showerror("Invalid Selection", "Please select a valid folder.")
+        return
+
+    folder_name = os.path.basename(folder_path)
+    confirm = messagebox.askyesno("Confirm Deletion", f"Are you sure you want to delete the folder '{folder_name}'?")
+    if not confirm:
+        return
+
+    try:
+        dest = os.path.join(deleted_folder, folder_name)
+        shutil.move(folder_path, dest)
+        log = read_delete_log()
+        log[folder_name] = folder_path
+        write_delete_log(log)
+        refresh_file_lists()
+        messagebox.showinfo("Deleted", f"Folder '{folder_name}' has been deleted successfully.")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to delete folder '{folder_name}':\n{e}")
+
+# --- Restore File ---
+def select_and_restore_file():
     selected = deleted_listbox.curselection()
+    if not selected:
+        messagebox.showwarning("No Selection", "Please select a file or folder to restore.")
+        return
+    file_name = deleted_listbox.get(selected[0])
+    log = read_delete_log()
+    original_path = log.get(file_name)
+
+    if not original_path:
+        messagebox.showerror("Not Found", f"Original path for '{file_name}' not found.")
+        return
+
+    confirm = messagebox.askyesno("Confirm Restore", f"Restore '{file_name}' to:\n{original_path}?")
+    if not confirm:
+        return
+
+    try:
+        shutil.move(os.path.join(deleted_folder, file_name), original_path)
+
+        # ✅ ADDED: Copy restored file to recovered_folder for display
+        if os.path.isfile(original_path):
+            shutil.copy(original_path, os.path.join(recovered_folder, file_name))
+
+        log.pop(file_name)
+        write_delete_log(log)
+
+        history = read_restore_history()
+        history.append({
+            "file_name": file_name,
+            "original_path": original_path,
+            "restored_on": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+        write_restore_history(history)
+        refresh_file_lists()
+        messagebox.showinfo("Restored", f"'{file_name}' has been restored successfully.")
+    except Exception as e:
+        messagebox.showerror("Error", f"Restore failed: {e}")
+
+# --- Recycle Bin Functions ---
+def get_deleted_recyclebin_files():
+    items = []
+    if not winshell_available:
+        return items
+    for item in winshell.recycle_bin():
+        try:
+            name = str(item.filename() if callable(item.filename) else item.filename)
+            path = str(item.original_filename() if callable(item.original_filename) else item.original_filename)
+            items.append((name, path))
+        except Exception as e:
+            print("Error reading recycle bin item:", e)
+    return items
+
+def search_recyclebin_files(*args):
+    query = recycle_search_var.get().lower()
+    recycle_listbox.delete(0, tk.END)
+    for file, path in recycle_files:
+        if query in file.lower() or query in path.lower():
+            recycle_listbox.insert(tk.END, f"{file} -> {path}")
+
+def refresh_recycle_list():
+    global recycle_files
+    recycle_files = get_deleted_recyclebin_files()
+    search_recyclebin_files()
+
+def restore_recycle_file():
+    if not winshell_available:
+        messagebox.showerror("Not Available", "winshell module not available.")
+        return
+    selected = recycle_listbox.curselection()
     if selected:
-        file_name = deleted_listbox.get(selected[0])
-        log = load_log()
-        if file_name in log:
-            original_path = log[file_name]
-            source_path = os.path.join(deleted_folder, file_name)
-            shutil.copy2(source_path, original_path)
-            shutil.copy2(source_path, os.path.join(recovered_folder, file_name))
-            os.remove(source_path)
-            del log[file_name]
-            save_log(log)
+        file_name = recycle_listbox.get(selected[0]).split(" -> ")[0]
+        file_path = None
+        for file, path in recycle_files:
+            if file == file_name:
+                file_path = path
+                break
+        if file_path:
+            confirm = messagebox.askyesno("Confirm Restore", f"Restore '{file_name}' from Recycle Bin?")
+            if not confirm:
+                return
+            try:
+                winshell.undelete(file_path)
+                messagebox.showinfo("Restored", f"Restored '{file_name}' from Recycle Bin")
+                refresh_recycle_list()
+            except Exception as e:
+                messagebox.showerror("Error", f"Restore failed: {e}")
 
-            # Save restore log
-            restore_history = load_restore_log()
-            restore_history.append({
-                "file_name": file_name,
-                "original_path": original_path,
-                "restored_on": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-            save_restore_log(restore_history)
-
-            update_file_lists()
-            messagebox.showinfo("Recovered", f"Recovered {file_name} to original location")
-
-# Update File Lists
-def update_file_lists(filtered=None):
+# --- UI Logic ---
+def refresh_file_lists(filtered=None):
     deleted_listbox.delete(0, tk.END)
     recovered_listbox.delete(0, tk.END)
     files = os.listdir(deleted_folder)
@@ -84,9 +196,8 @@ def update_file_lists(filtered=None):
     for f in os.listdir(recovered_folder):
         recovered_listbox.insert(tk.END, f)
 
-# Restore History Window
-def view_restore_history():
-    history = load_restore_log()
+def show_restore_history_window():
+    history = read_restore_history()
     win = tk.Toplevel(root)
     win.title("Restore History")
     win.geometry("600x300")
@@ -104,18 +215,23 @@ def view_restore_history():
     tree.configure(yscroll=scrollbar.set)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-# Search Functionality
-def search_files():
+def search_deleted_files():
     query = search_var.get()
-    update_file_lists(filtered=query)
+    refresh_file_lists(filtered=query)
 
-# Theme toggle
+def search_recovered_files(query):
+    recovered_listbox.delete(0, tk.END)
+    files = os.listdir(recovered_folder)
+    for f in files:
+        if query.lower() in f.lower():
+            recovered_listbox.insert(tk.END, f)
+
 def toggle_theme():
     global is_dark_mode
     is_dark_mode = not is_dark_mode
-    set_theme()
+    apply_theme()
 
-def set_theme():
+def apply_theme():
     if is_dark_mode:
         style.theme_use('clam')
         root.configure(bg="#2e2e2e")
@@ -131,25 +247,26 @@ def set_theme():
         style.configure("TFrame", background="SystemButtonFace")
         style.configure("TEntry", fieldbackground="white", foreground="black")
 
-# Main GUI
+# --- GUI Setup ---
 root = tk.Tk()
 root.title("File Recovery Tool")
-root.geometry("850x550")
+root.geometry("950x700")
 
 style = ttk.Style()
 is_dark_mode = False
-set_theme()
+apply_theme()
 
-# --- Top Controls ---
+# --- Top Buttons ---
 top_frame = ttk.Frame(root)
 top_frame.pack(pady=10)
 
-ttk.Button(top_frame, text="Delete File", command=delete_file, width=20).grid(row=0, column=0, padx=5)
-ttk.Button(top_frame, text="Recover File", command=recover_file, width=20).grid(row=0, column=1, padx=5)
-ttk.Button(top_frame, text="View Restore History", command=view_restore_history, width=20).grid(row=0, column=2, padx=5)
-ttk.Button(top_frame, text="Toggle Dark Mode", command=toggle_theme, width=20).grid(row=0, column=3, padx=5)
+ttk.Button(top_frame, text="Delete File", command=select_and_delete_file, width=20).grid(row=0, column=0, padx=5)
+ttk.Button(top_frame, text="Delete Folder", command=select_and_delete_folder, width=20).grid(row=0, column=1, padx=5)
+ttk.Button(top_frame, text="Recover File", command=select_and_restore_file, width=20).grid(row=0, column=2, padx=5)
+ttk.Button(top_frame, text="View Restore History", command=show_restore_history_window, width=20).grid(row=0, column=3, padx=5)
+ttk.Button(top_frame, text="Toggle Dark Mode", command=toggle_theme, width=20).grid(row=0, column=4, padx=5)
 
-# --- Search Bar ---
+# --- Search ---
 search_frame = ttk.Frame(root)
 search_frame.pack(pady=5)
 
@@ -157,20 +274,47 @@ ttk.Label(search_frame, text="Search Deleted Files:").pack(side=tk.LEFT, padx=5)
 search_var = tk.StringVar()
 search_entry = ttk.Entry(search_frame, textvariable=search_var, width=30)
 search_entry.pack(side=tk.LEFT, padx=5)
-ttk.Button(search_frame, text="Search", command=search_files).pack(side=tk.LEFT, padx=5)
+ttk.Button(search_frame, text="Search", command=search_deleted_files).pack(side=tk.LEFT, padx=5)
 
-# --- File Display ---
+ttk.Label(search_frame, text="Search Recovered Files:").pack(side=tk.LEFT, padx=(30, 5))
+search_recovered_var = tk.StringVar()
+search_recovered_entry = ttk.Entry(search_frame, textvariable=search_recovered_var, width=30)
+search_recovered_entry.pack(side=tk.LEFT, padx=5)
+search_recovered_var.trace("w", lambda *args: search_recovered_files(search_recovered_var.get()))
+
+# --- File Lists ---
 list_frame = ttk.Frame(root)
 list_frame.pack(pady=20)
 
 ttk.Label(list_frame, text="Deleted Files").grid(row=0, column=0, padx=30)
 ttk.Label(list_frame, text="Recovered Files").grid(row=0, column=1, padx=30)
 
-deleted_listbox = tk.Listbox(list_frame, width=40, height=15)
+deleted_listbox = tk.Listbox(list_frame, width=40, height=10)
 deleted_listbox.grid(row=1, column=0, padx=20)
 
-recovered_listbox = tk.Listbox(list_frame, width=40, height=15)
+recovered_listbox = tk.Listbox(list_frame, width=40, height=10)
 recovered_listbox.grid(row=1, column=1, padx=20)
 
-update_file_lists()
+# --- Recycle Bin View ---
+if winshell_available:
+    ttk.Label(root, text="Recycle Bin Files").pack(pady=(10, 0))
+    recycle_search_var = tk.StringVar()
+    recycle_search_var.trace("w", search_recyclebin_files)
+    recycle_search_entry = ttk.Entry(root, textvariable=recycle_search_var, width=50)
+    recycle_search_entry.pack(pady=5)
+
+    recycle_listbox = tk.Listbox(root, width=100, height=10)
+    recycle_listbox.pack()
+
+    recycle_btn_frame = ttk.Frame(root)
+    recycle_btn_frame.pack(pady=5)
+
+    ttk.Button(recycle_btn_frame, text="Refresh Recycle Bin", command=refresh_recycle_list).pack(side=tk.LEFT, padx=10)
+    ttk.Button(recycle_btn_frame, text="Restore Selected", command=restore_recycle_file).pack(side=tk.LEFT, padx=10)
+
+    recycle_files = get_deleted_recyclebin_files()
+    search_recyclebin_files()
+
+# --- Final Init ---
+refresh_file_lists()
 root.mainloop()
